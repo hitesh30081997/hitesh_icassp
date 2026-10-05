@@ -81,13 +81,26 @@ def load_model(path, device):
 @torch.no_grad()
 def predict_file(model, path, device):
     """
-    Calls model.predict() directly instead of model.transcribe(): in NeMo 2.x,
-    transcribe() calls decoder.freeze(), which this old model's plain
-    TransformerDecoder doesn't have ("... has no attribute 'freeze'").
+    Runs the model's prediction steps directly, working around two NeMo 2.x issues:
+    - transcribe() calls decoder.freeze(), which this old model's plain
+      TransformerDecoder doesn't have ("... has no attribute 'freeze'").
+    - predict() assumes the greedy generator returns a tensor, but in 2.x it
+      returns a tuple (tokens, ...) ("'tuple' object has no attribute 'detach'").
     """
+    from nemo.collections.asr.parts.utils.slu_utils import get_seq_mask
+
     audio = torch.tensor(load_audio(path), device=device).unsqueeze(0)  # [1, T]
     length = torch.tensor([audio.shape[1]], device=device)
-    return model.predict(input_signal=audio, input_signal_length=length)[0]
+
+    feats, feats_len = model.preprocessor(input_signal=audio, length=length)
+    encoded, encoded_len = model.encoder(audio_signal=feats, length=feats_len)
+    encoded = encoded.transpose(1, 2)  # BxDxT -> BxTxD
+    mask = get_seq_mask(encoded, encoded_len)
+
+    tokens = model.sequence_generator(encoded, mask)
+    if isinstance(tokens, (tuple, list)):
+        tokens = tokens[0]  # first element is the generated token tensor
+    return model.sequence_generator.decode_semantics_from_tokens(tokens)[0]
 
 
 def parse_prediction(text):
